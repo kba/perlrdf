@@ -51,10 +51,11 @@ L<RDF::Trine::Store> class.
 
 =over 4
 
-=item C<< new ( $url ) >>
+=item C<< new ( $url, [ $ua ] ) >>
 
 Returns a new storage object that will act as a proxy for the SPARQL endpoint
-accessible via the supplied C<$url>.
+accessible via the supplied C<$url>. The internally used LWP::UserAgent can be
+set with C<$ua>.
 
 =item C<new_with_config ( $hashref )>
 
@@ -78,7 +79,11 @@ The URL of the remote endpoint.
 sub new {
 	my $class	= shift;
 	my $url		= shift;
-	my $u = LWP::UserAgent->new( agent => "RDF::Trine/${RDF::Trine::VERSION}" );
+	my $u       = shift;
+	unless ($u) {
+        $u = LWP::UserAgent->new;
+    }
+    $u->agent( "RDF::Trine/${RDF::Trine::VERSION}" );
 	$u->default_headers->push_header( 'Accept' => "application/sparql-results+xml;q=0.9,application/rdf+xml;q=0.5,text/turtle;q=0.7,text/xml" );
 	
 	my $self	= bless({
@@ -138,9 +143,9 @@ sub get_statements {
 	
 	my $use_quad	= 0;
 	if (scalar(@_) >= 4) {
+        $use_quad	= 1;
 		my $g	= $nodes[3];
 		if (blessed($g) and not($g->is_variable) and not($g->is_nil)) {
-			$use_quad	= 1;
 			$bound++;
 			$bound{ 3 }	= $g;
 		}
@@ -158,27 +163,30 @@ sub get_statements {
 	my $node_count	= ($use_quad) ? 4 : 3;
 	my $st_class	= ($use_quad) ? 'RDF::Trine::Statement::Quad' : 'RDF::Trine::Statement';
 	my @triple	= @nodes[ 0..2 ];
-	my $iter;
+	my $sparql;
 	if ($use_quad) {
 		my @vars	= grep { $_->is_variable } @nodes;
 		my $names	= join(' ', map { '?' . $_->name } @vars);
 		my $nodes	= join(' ', map { ($_->is_variable) ? '?' . $_->name : $_->as_ntriples } @triple);
 		my $g		= $nodes[3]->is_variable ? '?g' : $nodes[3]->as_ntriples;
-		$iter	= $self->get_sparql( <<"END" );
+		$sparql = <<"END";
 SELECT $names WHERE {
 	GRAPH $g {
 		$nodes
 	}
 }
 END
-	} else {
+    } else {
 		my @vars	= grep { $_->is_variable } @triple;
 		my $names	= join(' ', map { '?' . $_->name } @vars);
 		my $nodes	= join(' ', map { ($_->is_variable) ? '?' . $_->name : $_->as_ntriples } @triple);
-		$iter	= $self->get_sparql( <<"END" );
+		$sparql =  <<"END";
 SELECT $names WHERE { $nodes }
 END
 	}
+
+#    warn $sparql;
+	my $iter = $self->get_sparql( $sparql );
 	my $sub		= sub {
 		my $row	= $iter->next;
 		return unless $row;
@@ -284,9 +292,17 @@ sub add_statement {
 	my $self	= shift;
 	my $st		= shift;
 	my $context	= shift;
+
 	unless (blessed($st) and $st->isa('RDF::Trine::Statement')) {
 		throw RDF::Trine::Error::MethodInvocationError -text => "Not a valid statement object passed to add_statement";
 	}
+	
+	if ($st->isa('RDF::Trine::Statement::Quad')) {
+		if (blessed($context)) {
+			throw RDF::Trine::Error::MethodInvocationError -text => "add_statement cannot be called with both a quad and a context";
+		}
+		$context	= $st->context;
+    }
 	
 	if ($self->_bulk_ops) {
 		push(@{ $self->{ ops } }, ['_add_statements', $st, $context]);
@@ -306,6 +322,8 @@ sub _add_statements_sparql {
 		my $context	= $op->[1];
 		if ($st->isa('RDF::Trine::Statement::Quad')) {
 			push(@parts, 'GRAPH ' . $st->context->as_ntriples . ' { ' . join(' ', map { $_->as_ntriples } ($st->nodes)[0..2]) . ' }');
+		} elsif ($context) {
+			push(@parts, 'GRAPH ' . $context->as_ntriples . ' { ' . join(' ', map { $_->as_ntriples } ($st->nodes)[0..2]) . ' }');
 		} else {
 			push(@parts, join(' ', map { $_->as_ntriples } $st->nodes) . ' .');
 		}
@@ -328,6 +346,13 @@ sub remove_statement {
 	unless (blessed($st) and $st->isa('RDF::Trine::Statement')) {
 		throw RDF::Trine::Error::MethodInvocationError -text => "Not a valid statement object passed to remove_statement";
 	}
+
+	if ($st->isa('RDF::Trine::Statement::Quad')) {
+		if (blessed($context)) {
+			throw RDF::Trine::Error::MethodInvocationError -text => "add_statement cannot be called with both a quad and a context";
+		}
+		$context	= $st->context;
+    }
 	
 	if ($self->_bulk_ops) {
 		push(@{ $self->{ ops } }, ['_remove_statements', $st, $context]);
@@ -347,6 +372,8 @@ sub _remove_statements_sparql {
 		my $context	= $op->[1];
 		if ($st->isa('RDF::Trine::Statement::Quad')) {
 			push(@parts, 'GRAPH ' . $st->context->as_ntriples . ' { ' . join(' ', map { $_->as_ntriples } ($st->nodes)[0..2]) . ' }');
+        } elsif ($context) {
+			push(@parts, 'GRAPH ' . $context->as_ntriples . ' { ' . join(' ', map { $_->as_ntriples } ($st->nodes)[0..2]) . ' }');
 		} else {
 			push(@parts, join(' ', map { $_->as_ntriples } $st->nodes) . ' .');
 		}
@@ -389,6 +416,8 @@ sub _remove_statement_patterns_sparql {
 		my $sparql;
 		if ($st->isa('RDF::Trine::Statement::Quad')) {
 			push(@parts, 'GRAPH ' . $st->context->as_ntriples . ' { ' . join(' ', map { $_->is_variable ? '?' . $_->name : $_->as_ntriples } ($st->nodes)[0..2]) . ' }');
+        } elsif ($context) {
+			push(@parts, 'GRAPH ' . $context->as_ntriples . ' { ' . join(' ', map { $_->is_variable ? '?' . $_->name : $_->as_ntriples } ($st->nodes)[0..2]) . ' }');
 		} else {
 			push(@parts, join(' ', map { $_->is_variable ? '?' . $_->name : $_->as_ntriples } $st->nodes) . ' .');
 		}
@@ -436,7 +465,8 @@ sub count_statements {
 	if ($use_quad) {
 		my $nodes;
 		if ($nodes[3]->isa('RDF::Trine::Node::Variable')) {
-			$nodes		= "GRAPH ?rt__graph { $triple }";
+#			$nodes		= "{GRAPH ?rt__graph { $triple }} UNION { $triple }";
+            $nodes		= "GRAPH ?rt__graph { $triple }";
 		} elsif ($nodes[3]->isa('RDF::Trine::Node::Nil')) {
 			$nodes	= join(' ', map { $_->is_variable ? '?' . $_->name : $_->as_ntriples } @nodes[0..2]);
 		} else {
@@ -450,7 +480,7 @@ sub count_statements {
 	my $iter	= $self->get_sparql( $sparql );
 	my $row		= $iter->next;
 	my $count	= $row->{count};
-	return unless ($count);
+	return 0 unless ($count);
 	return $count->literal_value;
 	
 # 	
@@ -475,7 +505,9 @@ Returns the number of statements in the store.
 
 sub size {
 	my $self	= shift;
-	return $self->count_statements( undef, undef, undef, undef );
+	my $quads = $self->count_statements( undef, undef, undef, undef );
+#	my $triples  = $self->count_statements( undef, undef, RDF::Trine::Node::Nil );
+	return $quads;
 }
 
 =item C<< supports ( [ $feature ] ) >>
@@ -542,7 +574,7 @@ sub _get_post_iterator {
 # 	warn $sparql;
 	
 	my $url			= $self->{url};
-	my $response	= $ua->post( $url, query => $sparql );
+	my $response	= $ua->post( $url, {query => $sparql} );
 	if ($response->is_success) {
 		$p->parse_string( $response->content );
 		return $handler->iterator;

@@ -392,6 +392,7 @@ sub bulk_add_statement_tests_simple {
 	
 	$store->_begin_bulk_ops if ($store->can('_begin_bulk_ops'));
 	$store->remove_statement( $triple, $ex->d );
+	$store->_end_bulk_ops;
 	is( $store->size, 0, 'store has 0 statements after (triple+context) remove' );
 	
 	my $quad2	= RDF::Trine::Statement::Quad->new($ex->a, $ex->b, $ex->c, iri('graph'));
@@ -484,6 +485,8 @@ sub literals_tests_simple {
 
 	my $triple2	= RDF::Trine::Statement->new($ex->a, $ex->b, $litstring);
 	$store->add_statement( $triple2 );
+#	warn $store->get_statements( undef, undef, undef )->to_string('nt');
+#	warn $store->get_statements( undef, undef, undef, undef )->to_string('nt');
 	is( $store->size, 4, 'store has 4 statements after (triple) add' );
 
 	{
